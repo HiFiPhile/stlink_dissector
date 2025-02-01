@@ -118,11 +118,14 @@ local dbg_freq_field = ProtoField.uint16("stlink.dbg.freq", "Frequency")
 local dbg_mem_addr_field = ProtoField.uint32("stlink.dbg.mem.addr", "Address", base.HEX)
 local dbg_mem_length_field = ProtoField.uint16("stlink.dbg.mem.len", "Length", base.HEX)
 
-local dbg_dap_reg_field = ProtoField.uint16("stlink.dbg.dap.reg", "Address", base.HEX)
-local dbg_dap_port_field = ProtoField.uint16("stlink.dbg.dap.reg", "Port")
-
-local dbg_reg_addr_field = ProtoField.uint32("stlink.dbg.reg.addr", "Address", base.HEX)
+local dbg_reg_addr_field = ProtoField.uint8("stlink.dbg.reg.addr", "Reg")
 local dbg_reg_val_field = ProtoField.uint32("stlink.dbg.reg.val", "Value", base.HEX)
+
+local dbg_debug_reg_field = ProtoField.uint32("stlink.dbg.dbg_reg", "Addr", base.HEX)
+local dbg_debug_reg_val_field = ProtoField.uint32("stlink.dbg_val", "Value", base.HEX)
+
+local dbg_dap_reg_field = ProtoField.uint16("stlink.dbg.dap_reg", "Address", base.HEX)
+local dbg_dap_port_field = ProtoField.uint16("stlink.dbg.dap_port", "Port")
 
 -- Response
 local resp_mode_field = ProtoField.uint8("stlink.resp.mode", "Mode", base.HEX, stlink_dev_mode)
@@ -138,6 +141,7 @@ stlink_protocol.fields = {
   dbg_mem_addr_field, dbg_mem_length_field,
   dbg_reg_addr_field, dbg_reg_val_field,
   dbg_ap_num_field, dbg_is_jtag_field,
+  dbg_debug_reg_field, dbg_debug_reg_val_field,
   dbg_dap_reg_field, dbg_dap_port_field,
   resp_status_field,
   resp_payload_field,
@@ -230,20 +234,36 @@ local function decode_cmd(buffer, pinfo, tree)
 
       pinfo.cols.info:append(', Addr: 0x' .. string.format("%08X", addr) .. ', Len: 0x' .. string.format("%04X", len))
 
-    -- Read (debug) reg
-    elseif dbg_cmd_id == 0x36 or dbg_cmd_id == 0x33 or dbg_cmd_id == 0x05 then
-      local addr = buffer(2,4):le_uint()
+    -- Read reg
+    elseif dbg_cmd_id == 0x33 or dbg_cmd_id == 0x05 then
+      local addr = buffer(2,1):le_uint()
 
       subtree:add(dbg_reg_addr_field, addr)
-      pinfo.cols.info:append(', Reg: 0x' .. string.format("%08X", addr))
+      pinfo.cols.info:append(', Reg: ' .. string.format("%d", addr))
 
-    -- Write (debug/dap) reg
-    elseif dbg_cmd_id == 0x35 or dbg_cmd_id == 0x0f or dbg_cmd_id == 0x34 or dbg_cmd_id == 0x06 then
-      local addr = buffer(2,4):le_uint()
-      local val = buffer(6,4):le_uint()
+    -- Write reg
+    elseif dbg_cmd_id == 0x34 or dbg_cmd_id == 0x06 then
+      local addr = buffer(2,1):le_uint()
+      local val = buffer(3,4):le_uint()
 
       subtree:add(dbg_reg_addr_field, addr)
       subtree:add(dbg_reg_val_field, addr)
+      pinfo.cols.info:append(', Reg: ' .. string.format("%d", addr) .. ', Val: 0x' ..string.format("%08X", val))
+
+    -- Read debug reg
+    elseif dbg_cmd_id == 0x36 then
+      local addr = buffer(2,4):le_uint()
+
+      subtree:add(dbg_debug_reg_field, addr)
+      pinfo.cols.info:append(', Reg: 0x' .. string.format("%08X", addr))
+
+    -- Write debug reg
+    elseif dbg_cmd_id == 0x35 or dbg_cmd_id == 0x0f then
+      local addr = buffer(2,4):le_uint()
+      local val = buffer(6,4):le_uint()
+
+      subtree:add(dbg_debug_reg_field, addr)
+      subtree:add(dbg_debug_reg_val_field, addr)
       pinfo.cols.info:append(', Reg: 0x' .. string.format("%08X", addr) .. ', Val: 0x' ..string.format("%08X", val))
 
     -- Read dap reg
@@ -290,6 +310,7 @@ local function decode_cmd(buffer, pinfo, tree)
     --print('Cmd - Num:' .. pinfo.number .. ' Buf:'.. tostring(buffer) .. ' Cmd:' .. num_str(cmd_id, 2) .. ' Dbg:' .. num_str(dbg_cmd_id, 2))
   end
 
+  return true
 end
 
 local function decode_resp(buffer, pinfo, tree, last_cmd, last_dbg_cmd)
@@ -377,7 +398,10 @@ end
 
 
 function stlink_protocol.dissector(buffer, pinfo, tree)
-  local resp_found = false
+  if decode_cmd(buffer, pinfo, tree) then
+    return
+  end
+
   if dst_addr ~= nil and (tostring(pinfo.src) == dst_addr or tostring(pinfo.dst) == dst_addr) then
     local cmd = resp_cache_get(pinfo.number)
     if cmd ~= nil then
@@ -385,7 +409,6 @@ function stlink_protocol.dissector(buffer, pinfo, tree)
       local last_dbg_cmd = cmd[2]
 
       decode_resp(buffer, pinfo, tree, last_cmd, last_dbg_cmd)
-      resp_found = true
     else
       cmd = cmd_cache_search(pinfo.number)
       if cmd ~= nil then
@@ -396,15 +419,11 @@ function stlink_protocol.dissector(buffer, pinfo, tree)
         if tostring(pinfo.src) == dst_addr and not last_cmd_tx or tostring(pinfo.dst) == dst_addr and last_cmd_tx then
           resp_cache_add(pinfo.number, cmd)
           decode_resp(buffer, pinfo, tree, last_cmd, last_dbg_cmd)
-          resp_found = true
         end
       end
     end
   end
 
-  if not resp_found then
-    decode_cmd(buffer, pinfo, tree)
-  end
 end
 
 DissectorTable.get("usb.bulk"):add(0xff, stlink_protocol)
